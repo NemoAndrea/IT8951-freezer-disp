@@ -1,2 +1,0 @@
-include src/IT8951/img_manip.pyx
-include src/IT8951/spi.pyx
