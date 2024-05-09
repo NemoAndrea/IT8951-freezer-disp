@@ -1,11 +1,8 @@
 
-import warnings
-from PIL import Image, ImageChops
+import displayio
 
 from .constants import DisplayModes, PixelModes, low_bpp_modes
 from .interface import EPD
-from . import img_manip
-
 
 class AutoDisplay:
     '''
@@ -20,13 +17,20 @@ class AutoDisplay:
     '''
 
     def __init__(self, width, height, rotate=None, mirror=False, track_gray=False):
-        self._set_rotate(rotate, mirror)
 
         self.display_dims = (width, height)
+        print(f"getting display dims {width} x {height}, fetched from IT8951.")
         if rotate in ('CW', 'CCW'):
-            self.frame_buf = Image.new('L', (height, width), 0xFF)
+            self.frame_buf = displayio.Bitmap(width, height, 0x10)  # 4 bit grayscale
         else:
-            self.frame_buf = Image.new('L', (width, height), 0xFF)
+            self.frame_buf = displayio.Bitmap(width, height, 0x10)  # 4 bit grayscale
+
+        for i in range (200):
+            self.frame_buf[i, i] = 0
+            self.frame_buf[i, i+1] = 0xF
+            self.frame_buf[i, i+2] = 0xF
+            self.frame_buf[i, i+3] = 0xF
+            self.frame_buf[i, i+4] = 0
 
         # keep track of what we have updated,
         # so that we can automatically do partial updates of only the
@@ -50,52 +54,26 @@ class AutoDisplay:
 
     def _get_frame_buf(self):
         '''
-        Return the frame buf, rotated according to flip. Always returns a copy, even
-        when rotate is None.
+        Return the frame buf.
         '''
-        if self._rotate_method is None:
-            return self.frame_buf.copy()
+        return self.frame_buf
 
-        return self.frame_buf.transpose(self._rotate_method)
-
-    def _set_rotate(self, rotate, mirror):
-
-        if not mirror:
-            methods = {
-                None   : None,
-                'CW'   : Image.Transpose.ROTATE_270,
-                'CCW'  : Image.Transpose.ROTATE_90,
-                'flip' : Image.Transpose.ROTATE_180,
-            }
-        else:
-            methods = {
-                None   : Image.Transpose.FLIP_LEFT_RIGHT,
-                'CW'   : Image.Transpose.TRANSPOSE,
-                'CCW'  : Image.Transpose.TRANSVERSE,
-                'flip' : Image.Transpose.FLIP_TOP_BOTTOM,
-            }
-
-        if rotate not in methods:
-            raise ValueError("invalid value for 'rotate'---options are None, 'CW', 'CCW', and 'flip'")
-
-        self._rotate_method = methods[rotate]
-
-    def draw_full(self, mode):
+    def draw_full(self):
         '''
         Write the full image to the device, and display it using mode
         '''
         frame = self._get_frame_buf()
 
-        self.update(frame.tobytes(), (0,0), self.display_dims, mode)
+        self.update(frame, (0,0), self.display_dims)
 
-        if self.track_gray:
-            if mode == DisplayModes.DU:
-                diff_box = self._compute_diff_box(self.prev_frame, frame, round_to=8)
-                self.gray_change_bbox = self._merge_bbox(self.gray_change_bbox, diff_box)
-            else:
-                self.gray_change_bbox = None
+        # if self.track_gray:
+        #     if mode == DisplayModes.DU:
+        #         diff_box = self._compute_diff_box(self.prev_frame, frame, round_to=8)
+        #         self.gray_change_bbox = self._merge_bbox(self.gray_change_bbox, diff_box)
+        #     else:
+        #         self.gray_change_bbox = None
 
-        self.prev_frame = frame
+        # self.prev_frame = frame
 
     def draw_partial(self, mode):
         '''
@@ -126,11 +104,6 @@ class AutoDisplay:
         # if it is, nothing to do
         if diff_box is not None:
             buf = frame.crop(diff_box)
-
-            # if we are using a black/white only mode, any pixels that changed should be
-            # converted to black/white
-            if mode == DisplayModes.DU:
-                img_manip.make_changes_bw(frame.crop(diff_box), buf)
 
             xy = (diff_box[0], diff_box[1])
             dims = (diff_box[2]-diff_box[0], diff_box[3]-diff_box[1])
@@ -212,65 +185,23 @@ class AutoEPDDisplay(AutoDisplay):
                  bus=0, device=0, spi_hz=24000000,
                  **kwargs):
 
-        epd = EPD(vcom=vcom, bus=bus, device=device, data_hz=spi_hz)
+        epd = EPD(vcom=vcom)
 
         self.epd = epd
         AutoDisplay.__init__(self, self.epd.width, self.epd.height, **kwargs)
 
-    def update(self, data, xy, dims, mode, pixel_format=PixelModes.M_4BPP):
-
-        # these modes only use two pixels, so use a more dense packing for them
-        # TODO: 2BPP doesn't seem to refresh correctly?
-        # if mode in low_bpp_modes:
-        #     pixel_format = PixelModes.M_2BPP
-        # else:
-        #     pixel_format = PixelModes.M_4BPP
-
+    def update(self, data, xy, dims):
         # send image to controller
         self.epd.wait_display_ready()
+
         self.epd.load_img_area(
             data,
             xy=xy,
-            dims=dims,
-            pixel_format=pixel_format
+            dims=dims
         )
 
-        # display sent image
+        # actually display the sent image
         self.epd.display_area(
             xy,
             dims,
-            mode
         )
-
-
-class VirtualEPDDisplay(AutoDisplay):
-    '''
-    This class opens a Tkinter window showing what would be displayed on the
-    EPD, to allow testing without a physical e-paper device
-    '''
-
-    def __init__(self, dims=(800,600), **kwargs):
-        AutoDisplay.__init__(self, dims[0], dims[1], **kwargs)
-
-        import tkinter as tk
-        from PIL import ImageTk
-
-        self.root = tk.Tk()
-        self.photoimage = ImageTk.PhotoImage
-
-        self.pil_img = self._get_frame_buf().copy()
-        self.tk_img = self.photoimage(self.pil_img)
-        self.panel = tk.Label(self.root, image=self.tk_img)
-        self.panel.pack(side="bottom", fill="both", expand="yes")
-
-    def __del__(self):
-        self.root.destroy()
-
-    def update(self, data, xy, dims, mode):
-        data_img = Image.frombytes(self._get_frame_buf().mode, dims, bytes(data))
-        self.pil_img.paste(data_img, box=xy)
-        self.tk_img = self.photoimage(self.pil_img)
-        self.panel.configure(image=self.tk_img) # not sure if this is actually necessary
-
-        # allow Tk to do whatever it needs to do
-        self.root.update()

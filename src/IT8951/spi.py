@@ -1,9 +1,14 @@
 import board
 import digitalio
 import busio
+import time
 from array import array
 
+from .constants import PixelModes, Commands
+
 class SPI:
+    max_transfer_size = 1024
+
     def __init__(self):
         
         self.cs = digitalio.DigitalInOut(board.IO34)  # chip select pin
@@ -20,6 +25,8 @@ class SPI:
         self.spi_bus.configure(baudrate=1000000, phase=0, polarity=0)
 
     def write_cmd(self, cmd, *args):  # cmd must be 2 byte number, e.g. 0xFF9F
+        print(f"[CMD] {hex(cmd)} with {args} arguments.")
+
         # the fixed preamble for 'commands' is 0x6000.
         data = [0x60,0x00, 0x00, 0x00]
 
@@ -29,6 +36,7 @@ class SPI:
         self.cs.value = False
         self.spi_bus.write(bytes(data)) #0x6000 -> 0x0302
         self.cs.value = True
+        time.sleep(0.1)
 
         for arg in args:
             self.write_data([arg])
@@ -37,20 +45,78 @@ class SPI:
         '''
         Send preamble, and then write the data in arr (16-bit unsigned ints) over SPI
         '''
-        print("WRITE_DATA...")
+
         # unpack int (16-bit) array into byte (8-bit) array 
-        arr_bytes = array('B', range(len(arr)*2 + 2))  # +2 for the preamble (0x00, 0x00)
+        nbytes = len(arr)*2 + 2
+        arr_bytes = array('B', (0 for _ in range(nbytes)))  # +2 for the preamble (0x00, 0x00)
         arr_bytes[0] = 0x00
         arr_bytes[1] = 0x00
         for i in range(len(arr)):
             arr_bytes[i*2+2] = (arr[i] >> 8) & 0xFF
             arr_bytes[i*2+3] = arr[i] & 0xFF
 
-        print(f"sending spi.data: {arr_bytes}")
+        print(f">> write_data is sending : {arr_bytes}")
 
         self.cs.value = False
-        self.spi_bus.write(bytes(arr_bytes)) 
+        self.spi_bus.write(arr_bytes) 
         self.cs.value = True
+        time.sleep(0.1)
+
+    def pack_and_write_pixels(self, pixbuf):
+        '''
+        Pack pixels into a byte buffer, and write them to the device. Pixbuf should be
+        an array with each value an individual pixel, in the range 0x00-0xFF. Note that
+        the intended display only has a 4-bit grayscale depth, so intensities above
+        2^4 wil not be used.
+        '''
+
+        pixbuf_len = pixbuf.width*pixbuf.height
+        pix_per_byte = PixelModes.M_4BPP  # 2 pixels per byte
+
+        # how many pixels are we sending in a single spi tranmissiong? (remember our smallest valid transmission is per 16 bit words)
+        # pix_per_transfer = pixels_per_word * words_per_transfer
+        pix_per_transfer = 2*pix_per_byte * ((self.max_transfer_size - 2)//2)
+
+        print("sending pixel data...")
+
+        lastpix = 0  # TODO: remove
+
+        print(f"[SPI] will need {pixbuf_len // pix_per_transfer} transfers")
+        for block_start in range(0, pixbuf_len, pix_per_transfer):
+            
+            # final transfer may be shorter than the max we could send per transmission
+            pix_count = min(pix_per_transfer, pixbuf_len-block_start)
+
+            # how many bytes must we allocate? (note again that the smallest chunk we can send is
+            # a 16-bit word.
+            nbytes = 2 + 2*( (pix_count+2*pix_per_byte-1)//(2*pix_per_byte) )
+            transfer_data = array('B', (0 for _ in range(nbytes)))  # initialise array  
+
+            #print(f"need {nbytes}bytes and {pix_count}pix (of max {self.max_transfer_size}) to send image data.")
+
+            # preamble, indicating it is a "data" transmission
+            transfer_data[0] = 0x00
+            transfer_data[1] = 0x00
+
+            for byte_idx in range(2, nbytes):  # start from 2 because preamble sits at 0,1
+                pix_index = block_start + byte_idx*2
+                if pix_index < 2628288:  # TODO, maybe see if this can be avoided
+                    # if lastpix != pixbuf[pix_index]:
+                    #     print(pixbuf[pix_index])
+                    lastpix = pixbuf[pix_index]
+                    packed_pixels = (pixbuf[pix_index] << 4) + (pixbuf[pix_index+1])
+                    transfer_data[byte_idx] = 0xFF # packed_pixels
+                else:
+                    transfer_data[byte_idx] = 0x00
+
+            #print(f"check sending spi.data: {transfer_data[0], transfer_data[1]}") #TOOD remove
+
+            assert(len(transfer_data) <= self.max_transfer_size)
+
+            self.cs.value = False
+            self.spi_bus.write(transfer_data) 
+            self.cs.value = True
+
 
     def read(self, numwords):
         '''
@@ -62,19 +128,23 @@ class SPI:
         and returned data are on the same transaction (no CS=high in between).
         '''
 
-        result = bytearray(numwords*2 + 4)  # 2 bytes for preamble + 2 dummy bytes
+        write_data = bytearray(numwords*2 + 4)  # 2 dummy bytes that we must read on top of expected data
+        write_data[0] = 0x10  # READ preamble
+        write_data[1] = 0x00  # READ preamble
+
+        read_data = bytearray(numwords*2 + 4)  # 2 dummy bytes that we must read on top of expected data
 
         self.cs.value = False
-        self.spi_bus.write(bytes([0x10,0x00]))  # needs to be sent out before data is returned
-        self.spi_bus.readinto(result)
+        self.spi_bus.write_readinto(write_data, read_data)
         self.cs.value = True
 
         # we now need to pack the data into array of 16bit values
-        # TODO: figure out why we do not nee to add +4 to index (preamble+dummy)
-        returned = array('I', range(numwords))   
+        returned = array('I', (0 for _ in range(numwords)))   
+
+        print(f"[SPI][READ] returned data: {list(hex(val) for val in read_data)}")
 
         for i in range(numwords):
-            returned[i] = (result[2*i] << 8) +  result[2*i+1]
+            returned[i] = (read_data[2*i+4] << 8) +  read_data[2*i+5]
 
         return returned
     
@@ -82,4 +152,12 @@ class SPI:
         '''
         Read a single 16 bit int from the device
         '''
-        return self.read_data(1)[0]
+        return self.read(1)[0]
+    
+
+    def read_register(self, register_addr, resp_length):
+        print(f"Reading register {hex(register_addr)}")
+        self.write_cmd(Commands.REG_RD, register_addr)
+        print(self.read(resp_length))
+
+        	
