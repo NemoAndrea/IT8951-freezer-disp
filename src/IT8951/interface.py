@@ -6,7 +6,9 @@ from time import sleep
 
 class EPD:
     '''
-    An interface to the electronic paper display (EPD).
+    An interface to the electronic paper display (EPD). 
+    
+    Values are hardcoded for the Waveshare 10.3inch 1872×1404 display (SKU:26936).
 
     Parameters
     ----------
@@ -14,25 +16,21 @@ class EPD:
     vcom : float
          The VCOM voltage that produces optimal display. Varies from
          device to device.
-
-    **spi_kwargs
-         Extra arguments will be passed to the SPI class's initialization.
-         See spi.pyx for details.
     '''
 
-    def __init__(self, vcom=-1.5, **spi_kwargs):
+    def __init__(self, vcom=-1.5):
 
         # do this here so we don't have to in the case
         # of a "virtual" display
         from .spi import SPI
-        self.spi = SPI(**spi_kwargs)
+        self.spi = SPI()
 
         self.width            = None
         self.height           = None
         self.img_buf_address  = None
         self.firmware_version = None
         self.lut_version      = None
-        self.update_system_info()
+        self.update_system_info()  # fetch info for the items above
 
         self._set_img_buf_base_addr(self.img_buf_address)
 
@@ -41,7 +39,7 @@ class EPD:
 
         self.set_vcom(vcom)
 
-    def load_img_area(self, buf, rotate_mode=constants.Rotate.NONE, xy=None, dims=None, pixel_format=None):
+    def load_img_area(self, buf, rotate_mode=constants.Rotate.NONE, xy=None, dims=None):
         '''
         Write the pixel data in buf (an array of bytes, 1 per pixel) to device memory.
         This function does not actually display the image (see EPD.display_area).
@@ -99,16 +97,23 @@ class EPD:
         Get information about the system, and store it in class attributes
         '''
         self.spi.write_cmd(Commands.GET_DEV_INFO)
-        data = self.spi.read_data(20)
+        data = self.spi.read(20)
 
         if all(x == 0 for x in data):
             raise RuntimeError("communication with device failed")
+        
+        
 
         self.width  = data[0]
         self.height = data[1]
         self.img_buf_address = data[3] << 16 | data[2]
         self.firmware_version = ''.join([chr(x>>8)+chr(x&0xFF) for x in data[4:12]])
-        self.lut_version      = ''.join([chr(x>>8)+chr(x&0xFF) for x in data[12:20]])
+        self.lut_version      = ''.join([chr(x>>8)+chr(x&0xFF) for x in data[12:20]])\
+        
+        print(f" width is {self.width}")
+        print(self.height)
+        print(self.img_buf_address)
+        print(self.firmware_version)
 
     def get_vcom(self):
         '''
@@ -167,64 +172,12 @@ class EPD:
         Write to a device register
         '''
         self.spi.write_cmd(Commands.REG_WR, address)
+        print(f"value: {val}")
         self.spi.write_data((val,))
 
     def _set_img_buf_base_addr(self, address):
         word0 = address >> 16
         word1 = address & 0xFFFF
         self.write_register(Registers.LISAR+2, word0)
+        print("word 1.....")
         self.write_register(Registers.LISAR, word1)
-
-    ##########
-    # the following functions are transcribed from example code from waveshare, but have not
-    # been tested
-
-    # def mem_burst_read_trigger(self, address, count):
-    #     # these are both 32 bits, so we need to split them
-    #     # up into two 16 bit values
-
-    #     addr0 = address & 0xFFFF
-    #     addr1 = address >> 16
-
-    #     len0 = count & 0xFFFF
-    #     len1 = count >> 16
-
-    #     self.spi.write_cmd(Commands.MEM_BST_RD_T,
-    #                        addr0, addr1, len0, len1)
-
-    # def mem_burst_read_start(self):
-    #     self.spi.write_cmd(Commands.MEM_BST_RD_S)
-
-    # def mem_burst_write(self, address, count):
-    #     addr0 = address & 0xFFFF
-    #     addr1 = address >> 16
-
-    #     len0 = count & 0xFFFF
-    #     len1 = count >> 16
-
-    #     self.spi.write_cmd(Commands.MEM_BST_WR,
-    #                    addr0, addr1, len0, len1)
-
-    # def mem_burst_end(self):
-    #     self.spi.write_cmd(Commands.MEM_BST_END)
-
-    # def display_area_1bpp(self, xy, dims, display_mode, background_gray, foreground_gray):
-
-    #     # set display to 1bpp mode
-    #     old_value = self.read_register(Registers.UP1SR+2)
-    #     self.write_register(Registers.UP1SR+2, old_val | (1<<2))
-
-    #     # set color table
-    #     self.write_register(Registers.BGVR, (background_gray << 8) | foreground_gray)
-
-    #     # display image
-    #     self.display_area(xy, dims, display_mode)
-    #     self.wait_display_ready()
-
-    #     # back to normal mode
-    #     old_value = self.read_register(Registers.UP1SR+2)
-    #     self.write_register(Registers.UP1SR+2, old_value & ~(1<<2))
-
-    # def display_area_buf(self, xy, dims, display_mode, display_buf_address):
-    #     self.spi.write_cmd(Commands.DPY_BUF_AREA, xy[0], xy[1], dims[0], dims[1], display_mode,
-    #                        display_buf_address & 0xFFFF, display_buf_address >> 16)
