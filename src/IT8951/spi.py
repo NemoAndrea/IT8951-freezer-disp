@@ -7,7 +7,7 @@ from array import array
 from .constants import PixelModes, Commands
 
 class SPI:
-    max_transfer_size = 1024
+    max_transfer_size = 4096 
 
     def __init__(self):
         
@@ -22,7 +22,7 @@ class SPI:
         print("got lock on SPI bus.")
 
         # NOTE: max spi clock is 24MHz
-        self.spi_bus.configure(baudrate=1000000, phase=0, polarity=0)
+        self.spi_bus.configure(baudrate=8000000, phase=0, polarity=0)
 
     def write_cmd(self, cmd, *args):  # cmd must be 2 byte number, e.g. 0xFF9F
         print(f"[CMD] {hex(cmd)} with {args} arguments.")
@@ -105,7 +105,7 @@ class SPI:
                     #     print(pixbuf[pix_index])
                     lastpix = pixbuf[pix_index]
                     packed_pixels = (pixbuf[pix_index] << 4) + (pixbuf[pix_index+1])
-                    transfer_data[byte_idx] = 0xFF # packed_pixels
+                    transfer_data[byte_idx] = packed_pixels
                 else:
                     transfer_data[byte_idx] = 0x00
 
@@ -144,6 +144,7 @@ class SPI:
         print(f"[SPI][READ] returned data: {list(hex(val) for val in read_data)}")
 
         for i in range(numwords):
+
             returned[i] = (read_data[2*i+4] << 8) +  read_data[2*i+5]
 
         return returned

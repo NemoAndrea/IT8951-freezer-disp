@@ -1,5 +1,6 @@
 
 import displayio
+import random
 
 from .constants import DisplayModes, PixelModes, low_bpp_modes
 from .interface import EPD
@@ -25,12 +26,14 @@ class AutoDisplay:
         else:
             self.frame_buf = displayio.Bitmap(width, height, 0x10)  # 4 bit grayscale
 
-        for i in range (200):
-            self.frame_buf[i, i] = 0
-            self.frame_buf[i, i+1] = 0xF
-            self.frame_buf[i, i+2] = 0xF
-            self.frame_buf[i, i+3] = 0xF
-            self.frame_buf[i, i+4] = 0
+
+
+        x_start = random.randint(0, width-101)
+        y_start = random.randint(0, height-101)
+
+        for i in range(100):
+            for j in range(100):
+                self.frame_buf[x_start+i, y_start+j] = 0xF
 
         # keep track of what we have updated,
         # so that we can automatically do partial updates of only the
