@@ -52,7 +52,7 @@ class EPD:
         
         # print(self.spi.read_register(0x39, 1))
 
-    def load_img_area(self, buf, rotate_mode=constants.Rotate.NONE, xy=None, dims=None):
+    def load_img_area(self, buf, rotate_mode=constants.Rotate.CW, xy=None, dims=None):
         '''
         Write the pixel data in buf (an array of bytes, 1 per pixel) to device memory.
         This function does not actually display the image (see EPD.display_area). Uses 4 bits per pixel data format, as the intended display only has 4-bit grayscale depth.
@@ -77,15 +77,30 @@ class EPD:
 
         endian_type = constants.EndianTypes.BIG
 
-        xy = None # TODO: remove
         if xy is None:
             self._load_img_start(endian_type, rotate_mode)
         else:
+            print("-> updating subsection only!")
             self._load_img_area_start(endian_type, rotate_mode, xy, dims)
 
         self.spi.pack_and_write_pixels(buf)
 
         self._load_img_end()
+
+    def load_single_color(self, color):
+        '''
+        Transmit single colour into framebuffer without allocating full m x n framebuffer
+        in memory.
+        '''
+        endian_type = constants.EndianTypes.BIG
+        rotate_mode=constants.Rotate.NONE
+        self._load_img_start(endian_type, rotate_mode)
+
+        numpixels = self.width*self.height
+        self.spi.write_single_color(numpixels, color)
+
+        self._load_img_end()
+
 
     def display_area(self, xy, dims, display_mode=DisplayModes.GC16):
         '''
@@ -139,14 +154,14 @@ class EPD:
         if not -5 < vcom < 0:
             raise ValueError("vcom must be between -5 and 0")
 
-    def run(self):
-        self.spi.write_cmd(Commands.SYS_RUN)
+    # def run(self):
+    #     self.spi.write_cmd(Commands.SYS_RUN)
 
-    def standby(self):
-        self.spi.write_cmd(Commands.STANDBY)
+    # def standby(self):
+    #     self.spi.write_cmd(Commands.STANDBY)
 
-    def sleep(self):
-        self.spi.write_cmd(Commands.SLEEP)
+    # def sleep(self):
+    #     self.spi.write_cmd(Commands.SLEEP)
 
     def wait_display_ready(self):
         while(self.read_register(Registers.LUTAFSR)):

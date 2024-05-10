@@ -1,9 +1,11 @@
 
 import displayio
 import random
+import adafruit_imageload
 
-from .constants import DisplayModes, PixelModes, low_bpp_modes
+from .constants import DisplayModes
 from .interface import EPD
+
 
 class AutoDisplay:
     '''
@@ -21,12 +23,13 @@ class AutoDisplay:
 
         self.display_dims = (width, height)
         print(f"getting display dims {width} x {height}, fetched from IT8951.")
-        if rotate in ('CW', 'CCW'):
-            self.frame_buf = displayio.Bitmap(width, height, 0x10)  # 4 bit grayscale
-        else:
-            self.frame_buf = displayio.Bitmap(width, height, 0x10)  # 4 bit grayscale
 
+        
+        self.setup_display_groups(width, height)  # configure the display buffers
 
+        self.frame_buf = displayio.Bitmap(width, height, 0x10)  # 4 bit grayscale
+
+        # self.clear()  full display refresh in mode
 
         x_start = random.randint(0, width-101)
         y_start = random.randint(0, height-101)
@@ -47,135 +50,92 @@ class AutoDisplay:
             # start out with no changes
             self.gray_change_bbox = None
 
-    @property
-    def width(self):
-        return self.frame_buf.width
+    
+    def setup_display_groups(self, disp_width, disp_height):
+        # we set up our main "root group" for displayio
+        self.root_group = displayio.Group()
 
-    @property
-    def height(self):
-        return self.frame_buf.height
+        # and a loading screen
+        self.splash_screen = displayio.Group()
+        self.root_group.append(self.splash_screen)
 
-    def _get_frame_buf(self):
+        # and a subgroup that will hold the static elements of the UI 
+        self.static_ui_group = displayio.Group()
+        self.root_group.append(self.static_ui_group)
+
+        # and a subgroup that will hold the static elements of the UI 
+        self.text_labels = displayio.Group()
+        self.root_group.append(self.text_labels)
+
+    # TODO: remove test function
+    def draw_square(self, x, y, fill):
+        self.splash_screen[0].x = x
+        self.splash_screen[0].y = y
+        self.splash_screen[0].bitmap.fill(fill)
+
+
+    def draw_full(self, mode=DisplayModes.GC16):
         '''
-        Return the frame buf.
+        Write the full image to the device, and display it using mode. Draws the
+        displayio groups in their normal order stack. Multiple transmissions.
         '''
-        return self.frame_buf
 
-    def draw_full(self):
-        '''
-        Write the full image to the device, and display it using mode
-        '''
-        frame = self._get_frame_buf()
+        # TODO make proper recursive check
 
-        self.update(frame, (0,0), self.display_dims)
+        # load the different sprites into memory sequentially # TODO: can we flatten beforehand?
+        for group in self.root_group:
+            if not group.hidden:
+                for item in group:
+                    if isinstance(item, displayio.TileGrid):
+                        print("drawing tilegrid")
+                        self.draw_partial(item, mode, skip_show=True)
+                    # elif isinstance(item, adafruit_imageload.Label):
+                    #     print("drawing label")
+                    #     for letter in item:
+                    #         print(letter)
 
-        # if self.track_gray:
-        #     if mode == DisplayModes.DU:
-        #         diff_box = self._compute_diff_box(self.prev_frame, frame, round_to=8)
-        #         self.gray_change_bbox = self._merge_bbox(self.gray_change_bbox, diff_box)
-        #     else:
-        #         self.gray_change_bbox = None
 
-        # self.prev_frame = frame
+        # redraw the entire display
+        self.show_buffer((0,0), self.display_dims, mode)
 
-    def draw_partial(self, mode):
+    def draw_partial(self, tile, mode=DisplayModes.GC16, skip_show=False):
         '''
         Write only the rectangle bounding the pixels of the image that have changed
         since the last call to draw_full or draw_partial
         '''
 
-        if self.prev_frame is None:  # first call since initialization
-            self.draw_full(mode)
+        print(f"-- tile is:")
+        print(tile)
 
-        if mode in low_bpp_modes:
-            round_box = 8
+        pixels = tile.bitmap
+        xy = (tile.x, tile.y)
+        dims = (tile.tile_width, tile.tile_height)
+
+        assert xy[0] >= 0, "cannot draw with negative X origin"
+        assert xy[1] >= 0, "cannot draw with negative Y origin"
+
+        print(dims)
+        if not skip_show:
+            self.update(pixels, xy, dims, mode)
         else:
-            round_box = 4
-
-        frame = self._get_frame_buf()
-
-        # compute diff for this frame
-        diff_box = self._compute_diff_box(self.prev_frame, frame, round_to=round_box)
-
-        if self.track_gray:
-            self.gray_change_bbox = self._merge_bbox(self.gray_change_bbox, diff_box)
-            # reset grayscale changes to zero
-            if mode != DisplayModes.DU:
-                diff_box = self._round_bbox(self.gray_change_bbox, round_to=round_box)
-                self.gray_change_bbox = None
-
-        # if it is, nothing to do
-        if diff_box is not None:
-            buf = frame.crop(diff_box)
-
-            xy = (diff_box[0], diff_box[1])
-            dims = (diff_box[2]-diff_box[0], diff_box[3]-diff_box[1])
-
-            self.update(buf.tobytes(), xy, dims, mode)
-
-        self.prev_frame = frame
+            self.update_buffer(pixels, xy, dims)
 
     def clear(self):
         '''
         Clear display, device image buffer, and frame buffer (e.g. at startup)
         '''
-        # set frame buffer to all white
-        self.frame_buf.paste(0xFF, box=(0, 0, self.width, self.height))
-        self.draw_full(DisplayModes.INIT)
-
-    @classmethod
-    def _compute_diff_box(cls, a, b, round_to=2):
-        '''
-        Find the four coordinates giving the bounding box of differences between a and b
-        making sure they are divisible by round_to
-
-        Parameters
-        ----------
-
-        a : PIL.Image
-            The first image
-
-        b : PIL.Image
-            The second image
-
-        round_to : int
-            The multiple to align the bbox to
-        '''
-        box = ImageChops.difference(a, b).getbbox()
-        if box is None:
-            return None
-        return cls._round_bbox(box, round_to)
-
-    @staticmethod
-    def _round_bbox(box, round_to=4):
-        '''
-        Round a bounding box so the edges are divisible by round_to
-        '''
-        minx, miny, maxx, maxy = box
-        minx -= minx%round_to
-        maxx += round_to-1 - (maxx-1)%round_to
-        miny -= miny%round_to
-        maxy += round_to-1 - (maxy-1)%round_to
-        return (minx, miny, maxx, maxy)
-
-    @staticmethod
-    def _merge_bbox(a, b):
-        '''
-        Return a bounding box that contains both bboxes a and b
-        '''
-        if a is None:
-            return b
-
-        if b is None:
-            return a
-
-        minx = min(a[0], b[0])
-        miny = min(a[1], b[1])
-        maxx = max(a[2], b[2])
-        maxy = max(a[3], b[3])
-        return (minx, miny, maxx, maxy)
+        self.fill(0xF)
+    
+    def fill(self, color):
+        raise NotImplementedError
 
     def update(self, data, xy, dims, mode):
+        raise NotImplementedError
+    
+    def update_buffer(self, data, xy, dims, mode):
+        raise NotImplementedError
+    
+    def show_buffer(self, data, xy, dims, mode):
         raise NotImplementedError
 
 
@@ -193,7 +153,11 @@ class AutoEPDDisplay(AutoDisplay):
         self.epd = epd
         AutoDisplay.__init__(self, self.epd.width, self.epd.height, **kwargs)
 
-    def update(self, data, xy, dims):
+    def update(self, data, xy, dims, mode=DisplayModes.GC16):
+        self.update_buffer(data, xy, dims)
+        self.show_buffer(xy, dims, mode)
+
+    def update_buffer(self, data, xy, dims):
         # send image to controller
         self.epd.wait_display_ready()
 
@@ -203,8 +167,20 @@ class AutoEPDDisplay(AutoDisplay):
             dims=dims
         )
 
-        # actually display the sent image
+    def show_buffer(self, xy, dims, mode=DisplayModes.GC16):
         self.epd.display_area(
             xy,
             dims,
+            mode
+        )
+
+    def fill(self, color):
+        # transmit single color for each pixel over SPI
+        self.epd.load_single_color(color)
+
+        # and show the fill color
+        self.epd.display_area(
+            (0,0),
+            (self.epd.width, self.epd.height),
+            display_mode=DisplayModes.GC16
         )

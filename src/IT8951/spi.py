@@ -6,8 +6,11 @@ from array import array
 
 from .constants import PixelModes, Commands
 
+import adafruit_imageload
+
+
 class SPI:
-    max_transfer_size = 4096 
+    max_transfer_size = 2048   # 4096 works fine
 
     def __init__(self):
         
@@ -62,6 +65,45 @@ class SPI:
         self.cs.value = True
         time.sleep(0.1)
 
+    # TODO: clean up this function
+    def write_single_color(self, length, color):
+        print(f"-> sending single color {color}")
+        pixbuf_len = length
+        pix_per_byte = PixelModes.M_4BPP  # 2 pixels per byte
+
+        # how many pixels are we sending in a single spi tranmissiong? (remember our smallest valid transmission is per 16 bit words)
+        # pix_per_transfer = pixels_per_word * words_per_transfer
+        pix_per_transfer = 2*pix_per_byte * ((self.max_transfer_size - 2)//2)
+
+        packed_pixels = color + (color << 4)  # pack 2 pixels into a byte
+        print(f"-> packed pixels {bin(packed_pixels)}")
+
+        print(f"[SPI] will need {pixbuf_len // pix_per_transfer} transfers")
+        for block_start in range(0, pixbuf_len, pix_per_transfer):
+            
+            # final transfer may be shorter than the max we could send per transmission
+            pix_count = min(pix_per_transfer, pixbuf_len-block_start)
+
+            # how many bytes must we allocate? (note again that the smallest chunk we can send is
+            # a 16-bit word.
+            nbytes = 2 + 2*( (pix_count+2*pix_per_byte-1)//(2*pix_per_byte) )
+            transfer_data = array('B', (0 for _ in range(nbytes)))  # initialise array  
+
+            # preamble, indicating it is a "data" transmission
+            transfer_data[0] = 0x00
+            transfer_data[1] = 0x00
+
+            for byte_idx in range(2, nbytes):  # start from 2 because preamble sits at 0,1
+                pix_index = block_start + byte_idx*2
+                if pix_index < pixbuf_len:  # TODO, maybe see if this can be avoided
+                    transfer_data[byte_idx] = packed_pixels
+
+            assert(len(transfer_data) <= self.max_transfer_size)
+
+            self.cs.value = False
+            self.spi_bus.write(transfer_data) 
+            self.cs.value = True
+
     def pack_and_write_pixels(self, pixbuf):
         '''
         Pack pixels into a byte buffer, and write them to the device. Pixbuf should be
@@ -89,8 +131,11 @@ class SPI:
 
             # how many bytes must we allocate? (note again that the smallest chunk we can send is
             # a 16-bit word.
-            nbytes = 2 + 2*( (pix_count+2*pix_per_byte-1)//(2*pix_per_byte) )
+            nbytes = 2 + 2*( (pix_count+2*pix_per_byte-1)//(2*pix_per_byte) )  # TODO: seems correct
             transfer_data = array('B', (0 for _ in range(nbytes)))  # initialise array  
+
+            assert nbytes % 2 == 0, "Number of bytes must be even, as we send in two-byte blocks."
+            assert pix_count % 4 == 0, "Number of pixels must be multiple of 4 as the smallest unit we can transmit over SPI is a block of 4 pixels"
 
             #print(f"need {nbytes}bytes and {pix_count}pix (of max {self.max_transfer_size}) to send image data.")
 
@@ -100,18 +145,15 @@ class SPI:
 
             for byte_idx in range(2, nbytes):  # start from 2 because preamble sits at 0,1
                 pix_index = block_start + byte_idx*2
-                if pix_index < 2628288:  # TODO, maybe see if this can be avoided
-                    # if lastpix != pixbuf[pix_index]:
-                    #     print(pixbuf[pix_index])
-                    lastpix = pixbuf[pix_index]
+                if pix_index < (pixbuf_len-1):  # TODO, maybe see if this can be avoided
                     packed_pixels = (pixbuf[pix_index] << 4) + (pixbuf[pix_index+1])
                     transfer_data[byte_idx] = packed_pixels
-                else:
+                else:  # TODO: this is hacky and needs to be avoided
                     transfer_data[byte_idx] = 0x00
 
             #print(f"check sending spi.data: {transfer_data[0], transfer_data[1]}") #TOOD remove
 
-            assert(len(transfer_data) <= self.max_transfer_size)
+            # assert(len(transfer_data) <= self.max_transfer_size)  TTODO: reinsert
 
             self.cs.value = False
             self.spi_bus.write(transfer_data) 
@@ -156,9 +198,9 @@ class SPI:
         return self.read(1)[0]
     
 
-    def read_register(self, register_addr, resp_length):
-        print(f"Reading register {hex(register_addr)}")
-        self.write_cmd(Commands.REG_RD, register_addr)
-        print(self.read(resp_length))
+    # def read_register(self, register_addr, resp_length):
+    #     print(f"Reading register {hex(register_addr)}")
+    #     self.write_cmd(Commands.REG_RD, register_addr)
+    #     print(self.read(resp_length))
 
         	
