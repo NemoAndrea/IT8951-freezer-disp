@@ -24,8 +24,12 @@ class SPI:
             pass
         print("got lock on SPI bus.")
 
-        # NOTE: max spi clock is 24MHz
-        self.spi_bus.configure(baudrate=8000000, phase=0, polarity=0)
+        # NOTE: max spi clock is 24MHz, but 2MHz seems about limit of disp?. 
+        self.spi_bus.configure(baudrate=4000000, phase=0, polarity=0)
+
+        # pre-allocate memory
+        self.transfer_buffer = bytearray(self.max_transfer_size)
+        self.transfer_view = memoryview(self.transfer_buffer)
 
     def write_cmd(self, cmd, *args):  # cmd must be 2 byte number, e.g. 0xFF9F
         print(f"[CMD] {hex(cmd)} with {args} arguments.")
@@ -58,16 +62,14 @@ class SPI:
             arr_bytes[i*2+2] = (arr[i] >> 8) & 0xFF
             arr_bytes[i*2+3] = arr[i] & 0xFF
 
-        print(f">> write_data is sending : {arr_bytes}")
+        #print(f">> write_data is sending : {arr_bytes}")
 
         self.cs.value = False
         self.spi_bus.write(arr_bytes) 
         self.cs.value = True
         time.sleep(0.1)
 
-    # TODO: clean up this function
     def write_single_color(self, length, color):
-        print(f"-> sending single color {color}")
         pixbuf_len = length
         pix_per_byte = PixelModes.M_4BPP  # 2 pixels per byte
 
@@ -75,34 +77,40 @@ class SPI:
         # pix_per_transfer = pixels_per_word * words_per_transfer
         pix_per_transfer = 2*pix_per_byte * ((self.max_transfer_size - 2)//2)
 
-        packed_pixels = color + (color << 4)  # pack 2 pixels into a byte
+        packed_pixels = (color << 4) | color  # pack 2 pixels into a byte
         print(f"-> packed pixels {bin(packed_pixels)}")
+
+        full_nbytes = 2 + 2 * ((pix_per_transfer + 3) // 4)
+
+        # preamble, indicating it is a "data" transmission
+        self.transfer_buffer[0] = 0x00
+        self.transfer_buffer[1] = 0x00
+
+        # get local refs
+        t_buffer = self.transfer_buffer
+        t_view = self.transfer_view
+        spi_write = self.spi_bus.write
+        cs = self.cs
 
         print(f"[SPI] will need {pixbuf_len // pix_per_transfer} transfers")
         for block_start in range(0, pixbuf_len, pix_per_transfer):
             
-            # final transfer may be shorter than the max we could send per transmission
-            pix_count = min(pix_per_transfer, pixbuf_len-block_start)
+            pix_count = min(pix_per_transfer, pixbuf_len - block_start)
+                    
+            # Determine exact byte size for this specific chunk
+            nbytes = 2 + 2 * ((pix_count + 3) // 4)
+            chunk = t_view[:nbytes]
 
-            # how many bytes must we allocate? (note again that the smallest chunk we can send is
-            # a 16-bit word.
-            nbytes = 2 + 2*( (pix_count+2*pix_per_byte-1)//(2*pix_per_byte) )
-            transfer_data = array('B', (0 for _ in range(nbytes)))  # initialise array  
+            if nbytes == full_nbytes:
+                # For a max-sized block, populate the whole slice instantly
+                t_buffer[2:nbytes] = bytes([packed_pixels]) * (nbytes - 2)
+            else:
+                # remainder block (greedy joink extra bytes (it doesnt seem to care))
+                t_buffer[2:nbytes] = bytes([packed_pixels]) * (nbytes - 2)
 
-            # preamble, indicating it is a "data" transmission
-            transfer_data[0] = 0x00
-            transfer_data[1] = 0x00
-
-            for byte_idx in range(2, nbytes):  # start from 2 because preamble sits at 0,1
-                pix_index = block_start + byte_idx*2
-                if pix_index < pixbuf_len:  # TODO, maybe see if this can be avoided
-                    transfer_data[byte_idx] = packed_pixels
-
-            assert(len(transfer_data) <= self.max_transfer_size)
-
-            self.cs.value = False
-            self.spi_bus.write(transfer_data) 
-            self.cs.value = True
+            cs.value = False
+            spi_write(chunk) 
+            cs.value = True
 
     def pack_and_write_pixels(self, pixbuf):
         '''
@@ -121,9 +129,12 @@ class SPI:
 
         print("sending pixel data...")
 
-        lastpix = 0  # TODO: remove
+        # get local refs to variables (for performance)
+        transfer_view = self.transfer_view 
+        spi_write = self.spi_bus.write
+        cs = self.cs
 
-        print(f"[SPI] will need {pixbuf_len // pix_per_transfer} transfers")
+        print(f"\n[SPI] will need {pixbuf_len // pix_per_transfer} transfers. Sending blocks...")
         for block_start in range(0, pixbuf_len, pix_per_transfer):
             
             # final transfer may be shorter than the max we could send per transmission
@@ -132,32 +143,36 @@ class SPI:
             # how many bytes must we allocate? (note again that the smallest chunk we can send is
             # a 16-bit word.
             nbytes = 2 + 2*( (pix_count+2*pix_per_byte-1)//(2*pix_per_byte) )  # TODO: seems correct
-            transfer_data = array('B', (0 for _ in range(nbytes)))  # initialise array  
+            
 
             assert nbytes % 2 == 0, "Number of bytes must be even, as we send in two-byte blocks."
             assert pix_count % 4 == 0, "Number of pixels must be multiple of 4 as the smallest unit we can transmit over SPI is a block of 4 pixels"
 
             #print(f"need {nbytes}bytes and {pix_count}pix (of max {self.max_transfer_size}) to send image data.")
 
+            chunk = transfer_view[:nbytes] 
             # preamble, indicating it is a "data" transmission
-            transfer_data[0] = 0x00
-            transfer_data[1] = 0x00
+            chunk[0] = 0x00
+            chunk[1] = 0x00
 
-            for byte_idx in range(2, nbytes):  # start from 2 because preamble sits at 0,1
-                pix_index = block_start + byte_idx*2
-                if pix_index < (pixbuf_len-1):  # TODO, maybe see if this can be avoided
-                    packed_pixels = (pixbuf[pix_index] << 4) + (pixbuf[pix_index+1])
-                    transfer_data[byte_idx] = packed_pixels
-                else:  # TODO: this is hacky and needs to be avoided
-                    transfer_data[byte_idx] = 0x00
+            idx = 2  # start at byte at idx 2
+            p_index = block_start  # keep track of what data we are reading from pixbuf
+            while idx < nbytes:
+                if p_index < (pixbuf_len - 1):
+                    chunk[idx] = (pixbuf[p_index] << 4) | pixbuf[p_index+1]
+                else:
+                    chunk[idx] = 0x00
+                p_index += 2
+                idx += 1
 
             #print(f"check sending spi.data: {transfer_data[0], transfer_data[1]}") #TOOD remove
 
             # assert(len(transfer_data) <= self.max_transfer_size)  TTODO: reinsert
 
-            self.cs.value = False
-            self.spi_bus.write(transfer_data) 
-            self.cs.value = True
+            cs.value = False
+            spi_write(chunk) 
+            cs.value = True
+        print("[SPI] all blocks sent...\n")
 
 
     def read(self, numwords):
@@ -183,7 +198,7 @@ class SPI:
         # we now need to pack the data into array of 16bit values
         returned = array('I', (0 for _ in range(numwords)))   
 
-        print(f"[SPI][READ] returned data: {list(hex(val) for val in read_data)}")
+        #print(f"[SPI][READ] returned data: {list(hex(val) for val in read_data)}")
 
         for i in range(numwords):
 

@@ -164,9 +164,10 @@ class EPD:
     #     self.spi.write_cmd(Commands.SLEEP)
 
     def wait_display_ready(self):
-        while(self.read_register(Registers.LUTAFSR)):
-            sleep(0.01)
-        print("Display ready !")
+        # while(self.read_register(Registers.LUTAFSR)):
+        #     sleep(0.01)
+        # print("Display ready !")
+        return
 
     def _load_img_start(self, endian_type, rotate_mode, pixel_format=PixelModes.M_4BPP):
         arg = (endian_type << 8) | (pixel_format << 4) | rotate_mode
